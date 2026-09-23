@@ -4,11 +4,27 @@ local MAP_W = 13
 local PATH, BLOCK, EMPTY, DOOR = 1, 2, 3, 4
 local DIR_L, DIR_U, DIR_R, DIR_D = 0, 1, 2, 3
 
+-- Vanilla minimap layout. The game exposes none of it, so these are measured
+-- values: VIEW is the map viewport at the top right of the screen, PAD its
+-- distance to the screen corner, STEP the distance between two room cells and
+-- CELL the size of one cell (cells overlap on the wall they share).
+-- The "swh" console command adjusts them in game, see README.
+local VIEW_SIZE = Vector(47, 47)
+local VIEW_PAD = Vector(6, 6)
+local CELL_STEP = Vector(8, 7)
+local CELL_SIZE = Vector(9, 8)
+local SCROLL_SPEED = 0.3 -- the map slides when moving to another room
+local ROCK_PIVOT = Vector(4, 4) -- rock_icon.anm2
+local ROCK_SIZE = Vector(8, 8)
+
 local game = Game()
 local rockSprite = nil
-local warnedMinimap = false
 local snapshots = {} -- [ListIndex] = walkable grid (row -> col -> PATH/BLOCK/EMPTY)
 local cachedHints = {} -- [ListIndex] = { {cellIdx, dir}, ... }
+local rooms = {dim = -1, size = -1, list = {}, occ = {}} -- rooms of the dimension we are in
+local viewCenter = nil -- cell the map is centered on, slides towards the current room
+local nudge = Vector(0, 0) -- console offset on VIEW_PAD
+local markCenter = false -- console: draw a rock on the middle of the viewport
 
 local SKIP_TYPES = {
 	[RoomType.ROOM_DUNGEON] = true,
@@ -184,13 +200,51 @@ local function neighborIndex(idx, dir)
 	end
 end
 
-local function ensureSprite()
-	if rockSprite then
-		return rockSprite
+-- Frames of rock_icon.png: the in game rock of every floor, shrunk to map size.
+-- Floors that dig up the same rock share a frame (Chest and Home use the
+-- Basement one, Dark Room the Sheol one, Necropolis the Depths one, ...).
+local ROCK = {
+	BASEMENT = 0, BURNING = 1, CELLAR = 2, DOWNPOUR = 3, DROSS = 4,
+	CAVES = 5, CATACOMBS = 6, FLOODED = 7, ASHPIT = 8, MINES = 9,
+	DEPTHS = 10, WOMB = 11, UTERO = 12, SCARRED = 13, BLUE_WOMB = 14,
+	MAUSOLEUM = 15, GEHENNA = 16, SHEOL = 17, CATHEDRAL = 18, CORPSE = 19,
+}
+
+-- One row per chapter, indexed by StageType + 1.
+local CHAPTER_ROCKS = {
+	-- original      wotl            afterbirth     greed          repentance      repentance b
+	{ROCK.BASEMENT, ROCK.CELLAR,    ROCK.BURNING,  ROCK.BASEMENT, ROCK.DOWNPOUR,  ROCK.DROSS},
+	{ROCK.CAVES,    ROCK.CATACOMBS, ROCK.FLOODED,  ROCK.CAVES,    ROCK.MINES,     ROCK.ASHPIT},
+	{ROCK.DEPTHS,   ROCK.DEPTHS,    ROCK.DEPTHS,   ROCK.DEPTHS,   ROCK.MAUSOLEUM, ROCK.GEHENNA},
+	{ROCK.WOMB,     ROCK.UTERO,     ROCK.SCARRED,  ROCK.WOMB,     ROCK.CORPSE,    ROCK.CORPSE},
+}
+
+local function floorRock()
+	local level = game:GetLevel()
+	local stage, styp = level:GetStage(), level:GetStageType()
+	if stage == LevelStage.STAGE4_3 then
+		return ROCK.BLUE_WOMB
+	elseif stage == LevelStage.STAGE5 then
+		return styp == StageType.STAGETYPE_WOTL and ROCK.CATHEDRAL or ROCK.SHEOL
+	elseif stage == LevelStage.STAGE6 then
+		return styp == StageType.STAGETYPE_WOTL and ROCK.BASEMENT or ROCK.SHEOL -- Chest / Dark Room
+	elseif stage == LevelStage.STAGE8 then
+		return ROCK.BASEMENT -- Home
 	end
-	rockSprite = Sprite()
-	rockSprite:Load("gfx/secret_wall_hints/rock_icon.anm2", true)
-	rockSprite:Play("Idle", true)
+	-- Greed mode runs one floor per chapter, the others two.
+	local chapter = CHAPTER_ROCKS[game:IsGreedMode() and stage or math.ceil(stage / 2)]
+	if not chapter then
+		return ROCK.SHEOL -- Void, greed mode Sheol and shop
+	end
+	return chapter[styp + 1] or chapter[1]
+end
+
+local function ensureSprite()
+	if not rockSprite then
+		rockSprite = Sprite()
+		rockSprite:Load("gfx/secret_wall_hints/rock_icon.anm2", true)
+	end
+	rockSprite:SetFrame("Idle", floorRock())
 	return rockSprite
 end
 
@@ -289,19 +343,41 @@ local function snapshotCurrentRoom()
 	cachedHints[desc.ListIndex] = nil
 end
 
-local function buildOccupancy()
-	local occ = {}
-	local rooms = game:GetLevel():GetRooms()
-	for i = 0, rooms.Size - 1 do
-		local desc = rooms:Get(i)
-		if desc.GridIndex >= 0 and desc.Data then
-			local offsets = SHAPE_OFFSETS[desc.Data.Shape] or {0}
-			for _, off in ipairs(offsets) do
-				occ[desc.GridIndex + off] = desc
+local function currentDimension()
+	local level = game:GetLevel()
+	local desc = level:GetCurrentRoomDesc()
+	for dim = 0, 2 do
+		if GetPtrHash(level:GetRoomByIdx(desc.SafeGridIndex, dim)) == GetPtrHash(desc) then
+			return dim
+		end
+	end
+	return 0
+end
+
+-- Rooms of the dimension we are in, with the cells they occupy: the mirror
+-- dimension and the mineshaft sit on the same grid indices, and only one of
+-- them is on the map at a time. Rebuilt when a room is added (red rooms).
+local function currentRooms()
+	local level = game:GetLevel()
+	local list = level:GetRooms()
+	local dim = currentDimension()
+	if rooms.dim == dim and rooms.size == list.Size then
+		return rooms
+	end
+	rooms = {dim = dim, size = list.Size, list = {}, occ = {}}
+	cachedHints = {}
+	for i = 0, list.Size - 1 do
+		local desc = list:Get(i)
+		if desc and desc.Data and desc.GridIndex >= 0
+			and GetPtrHash(level:GetRoomByIdx(desc.SafeGridIndex, dim)) == GetPtrHash(desc)
+		then
+			rooms.list[#rooms.list + 1] = desc
+			for _, off in ipairs(SHAPE_OFFSETS[desc.Data.Shape] or {0}) do
+				rooms.occ[desc.GridIndex + off] = desc
 			end
 		end
 	end
-	return occ
+	return rooms
 end
 
 local function tilesReachable(grid, tiles)
@@ -359,6 +435,9 @@ local function computeHints(desc, occ)
 						elseif slot ~= nil and not slotAllowed(doors, slot) then
 							blocked = true
 						else
+							-- No snapshot: we have never been in that room, so we
+							-- know where its doors can go but not what stands in
+							-- front of them. The wall stays a maybe until we visit.
 							local grid = snapshots[desc.ListIndex]
 							if grid then
 								blocked = not tilesReachable(grid, tiles)
@@ -377,54 +456,94 @@ local function computeHints(desc, occ)
 	return hints
 end
 
-local function cellPixels()
-	if not MinimapAPI then
-		return 9, 8
-	end
-	local rooms = MinimapAPI:GetLevel()
-	if rooms then
-		for i = 1, #rooms do
-			local a = rooms[i]
-			if a.RenderOffset and a.Position then
-				for j = i + 1, #rooms do
-					local b = rooms[j]
-					if b.RenderOffset then
-						local dx = a.Position.X - b.Position.X
-						local dy = a.Position.Y - b.Position.Y
-						local sx = a.RenderOffset.X - b.RenderOffset.X
-						local sy = a.RenderOffset.Y - b.RenderOffset.Y
-						if math.abs(dx) >= 1 and math.abs(sx) > 2 then
-							local px = math.abs(sx / dx)
-							local py = px
-							if math.abs(dy) >= 1 and math.abs(sy) > 2 then
-								py = math.abs(sy / dy)
-							end
-							if px > 2 and px < 80 then
-								return px, py
-							end
-						end
-					end
-				end
-			end
-		end
-	end
-	return 9, 8
+-- Screen size in render coordinates; there is no API for it either.
+local function screenSize()
+	local room = game:GetRoom()
+	local pos = room:WorldToScreenPosition(Vector.Zero) - room:GetRenderScrollOffset() - game.ScreenShakeOffset
+	return Vector((pos.X + 60 * 26 / 40) * 2 + 13 * 26, (pos.Y + 140 * 26 / 40) * 2 + 7 * 26)
 end
 
-local function edgeOffset(dir, pw, ph)
-	if dir == DIR_L then
-		return Vector(1, ph * 0.5)
-	elseif dir == DIR_U then
-		return Vector(pw * 0.5, 1)
-	elseif dir == DIR_R then
-		return Vector(pw - 1, ph * 0.5)
+-- Top-left pixel of the map viewport.
+local function viewOrigin()
+	local hud = Options.HUDOffset * 10
+	return Vector(
+		screenSize().X - hud * 2.2 - VIEW_PAD.X - VIEW_SIZE.X + nudge.X,
+		hud * 1.2 + VIEW_PAD.Y + nudge.Y)
+end
+
+local function shapeCells(shape)
+	local w, h = 1, 1
+	for _, off in ipairs(SHAPE_OFFSETS[shape] or {0}) do
+		w = math.max(w, off % MAP_W + 1)
+		h = math.max(h, math.floor(off / MAP_W) + 1)
 	end
-	return Vector(pw * 0.5, ph - 1)
+	return w, h
+end
+
+-- The map is centered on the middle of the room the player is in, and slides
+-- there instead of jumping when the room changes.
+local function updateViewCenter()
+	local desc = game:GetLevel():GetCurrentRoomDesc()
+	if desc.GridIndex < 0 or not desc.Data then
+		return nil -- off grid (dungeon, black market): the map is not ours to draw on
+	end
+	local w, h = shapeCells(desc.Data.Shape)
+	local target = Vector(desc.GridIndex % MAP_W + w * 0.5, math.floor(desc.GridIndex / MAP_W) + h * 0.5)
+	if not viewCenter or viewCenter:DistanceSquared(target) < 0.0001 then
+		viewCenter = target
+	else
+		viewCenter = target * SCROLL_SPEED + viewCenter * (1 - SCROLL_SPEED)
+	end
+	return viewCenter
+end
+
+-- Rock center, relative to the top-left of the cell. It sits on the wall itself:
+-- a hinted wall never has a room behind it, so the outer half covers empty map.
+local function edgeOffset(dir)
+	if dir == DIR_L then
+		return Vector(0.5, CELL_SIZE.Y * 0.5)
+	elseif dir == DIR_U then
+		return Vector(CELL_SIZE.X * 0.5, 0.5)
+	elseif dir == DIR_R then
+		return Vector(CELL_SIZE.X - 0.5, CELL_SIZE.Y * 0.5)
+	end
+	return Vector(CELL_SIZE.X * 0.5, CELL_SIZE.Y - 0.5)
+end
+
+local function hintPosition(cell, dir, origin, center)
+	local edge = edgeOffset(dir)
+	return origin + VIEW_SIZE * 0.5 + Vector(
+		((cell % MAP_W) - center.X) * CELL_STEP.X + edge.X,
+		(math.floor(cell / MAP_W) - center.Y) * CELL_STEP.Y + edge.Y)
+end
+
+-- Rooms are cut off at the edge of the viewport, rocks have to be as well.
+local function renderRock(spr, pos, origin)
+	local iconTL = pos - ROCK_PIVOT - origin
+	local tlcut = -iconTL
+	local brcut = iconTL + ROCK_SIZE - VIEW_SIZE
+	if tlcut.X >= ROCK_SIZE.X or tlcut.Y >= ROCK_SIZE.Y or brcut.X >= ROCK_SIZE.X or brcut.Y >= ROCK_SIZE.Y then
+		return
+	end
+	tlcut:Clamp(0, 0, ROCK_SIZE.X, ROCK_SIZE.Y)
+	brcut:Clamp(0, 0, ROCK_SIZE.X, ROCK_SIZE.Y)
+	spr:Render(pos, tlcut, brcut)
+end
+
+local function mapHeld()
+	for i = 0, game:GetNumPlayers() - 1 do
+		if Input.IsActionPressed(ButtonAction.ACTION_MAP, Isaac.GetPlayer(i).ControllerIndex) then
+			return true
+		end
+	end
+	return false
 end
 
 local function resetFloor()
 	snapshots = {}
 	cachedHints = {}
+	rooms = {dim = -1, size = -1, list = {}, occ = {}}
+	viewCenter = nil
 end
 
 local function onNewLevel()
@@ -446,52 +565,63 @@ local function onNewRoom()
 end
 
 local function onRender()
-	if not MinimapAPI then
-		if not warnedMinimap then
-			warnedMinimap = true
-			print("[Secret Wall Hints] Enable MiniMAPI (workshop id 1978904635).")
-		end
+	if not game:GetHUD():IsVisible() or game:GetSeeds():HasSeedEffect(SeedEffect.SEED_NO_HUD) then
 		return
 	end
-	if MinimapAPI.Config.Disable then
+	-- Nothing to draw on: the curse replaces the map with a question mark, and
+	-- the expanded map (map button held) is drawn at another scale.
+	if game:GetLevel():GetCurses() & LevelCurse.CURSE_OF_THE_LOST ~= 0 or mapHeld() then
 		return
 	end
-	if game:GetHUD():IsVisible() == false and not MinimapAPI.Config.DisplayOnNoHUD then
+
+	local center = updateViewCenter()
+	if not center then
 		return
 	end
 
 	local spr = ensureSprite()
-	local pw, ph = cellPixels()
-	local occ = buildOccupancy()
-	local rooms = game:GetLevel():GetRooms()
+	local origin = viewOrigin()
+	local floor = currentRooms()
 
-	for i = 0, rooms.Size - 1 do
-		local desc = rooms:Get(i)
-		if desc.GridIndex >= 0 and desc.Data and not SKIP_TYPES[desc.Data.Type] then
-			if desc.VisitedCount > 0 then
-				local mini = MinimapAPI:GetRoomByIdx(desc.SafeGridIndex)
-				if mini and mini.RenderOffset and mini:IsVisible() then
-					local hints = computeHints(desc, occ)
-					local origin = mini.Position
-					for h = 1, #hints do
-						local cell = hints[h].cell
-						local dir = hints[h].dir
-						local mx = cell % MAP_W
-						local my = math.floor(cell / MAP_W)
-						local localX = mx - origin.X
-						local localY = my - origin.Y
-						local pos = mini.RenderOffset
-							+ Vector(localX * pw, localY * ph)
-							+ edgeOffset(dir, pw, ph)
-						spr:Render(pos, Vector.Zero, Vector.Zero)
-					end
-				end
+	-- Every room the map draws a box for, visited or not: a room we only saw
+	-- through a mapping item still tells us where its doors cannot go.
+	for _, desc in ipairs(floor.list) do
+		if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] then
+			local hints = computeHints(desc, floor.occ)
+			for h = 1, #hints do
+				renderRock(spr, hintPosition(hints[h].cell, hints[h].dir, origin, center), origin)
 			end
 		end
 	end
+
+	if markCenter then
+		renderRock(spr, origin + VIEW_SIZE * 0.5, origin)
+	end
+end
+
+-- Map layout calibration, the game gives us no way to read it back.
+-- "swh" prints the offset, "swh <x> <y>" moves the map origin by that many
+-- pixels, "swh center" marks the middle of the viewport, "swh reset" clears it.
+local function onCommand(_, cmd, params)
+	if cmd ~= "swh" then
+		return
+	end
+	if params == "center" then
+		markCenter = not markCenter
+	elseif params == "reset" then
+		nudge = Vector(0, 0)
+		markCenter = false
+	else
+		local x, y = params:match("^%s*(-?%d+%.?%d*)%s+(-?%d+%.?%d*)%s*$")
+		if x then
+			nudge = Vector(tonumber(x), tonumber(y))
+		end
+	end
+	print(string.format("[Secret Wall Hints] nudge %g %g, center mark %s", nudge.X, nudge.Y, tostring(markCenter)))
 end
 
 mod:AddCallback(ModCallbacks.MC_POST_NEW_LEVEL, onNewLevel)
 mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, onNewRoom)
 mod:AddCallback(ModCallbacks.MC_POST_RENDER, onRender)
 mod:AddCallback(ModCallbacks.MC_PRE_GAME_EXIT, resetFloor)
+mod:AddCallback(ModCallbacks.MC_EXECUTE_CMD, onCommand)
