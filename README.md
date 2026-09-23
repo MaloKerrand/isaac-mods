@@ -27,14 +27,18 @@ Enable the mod, restart Isaac. After Lua edits: `luamod secret_wall_hints`.
 
 The game exposes nothing about where it draws the minimap, so the layout at the
 top of `main.lua` is measured by hand. If the rocks are off, the debug console
-(`~`) can move them:
+(`~`) can move them.
 
-- `swh center` — draws a rock on the middle of the map viewport, it should land
-  on the room you are in. Easiest to read in a 1x1 room.
-- `swh <x> <y>` — moves the whole map origin by that many pixels, e.g. `swh 2 -1`.
-- `swh` — prints the current offset, to copy into `VIEW_PAD`.
-- `swh reset` — back to the values in the file.
+Repentance+ does not run mod console commands (`MC_EXECUTE_CMD` is never
+called), so these go through the built-in `lua` command. On Repentance without
+the plus, `swh ...` works the same way without the `lua` wrapper.
+
+- `lua swh("center")` — draws a rock on the middle of the map viewport, it
+  should land on the room you are in. Easiest to read in a 1x1 room.
+- `lua swh(2, -1)` — moves the whole map origin by that many pixels.
+- `lua swh()` — prints the current offset, to copy into `VIEW_PAD`.
+- `lua swh("reset")` — back to the values in the file.
 
 # TODO
 
-- Show rocks on the expanded map (map button held)
+- Fix rocks being shown on non-entered rooms

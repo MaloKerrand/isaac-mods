@@ -5,26 +5,47 @@ local PATH, BLOCK, EMPTY, DOOR = 1, 2, 3, 4
 local DIR_L, DIR_U, DIR_R, DIR_D = 0, 1, 2, 3
 
 -- Vanilla minimap layout. The game exposes none of it, so these are measured
--- values: VIEW is the map viewport at the top right of the screen, PAD its
--- distance to the screen corner, STEP the distance between two room cells and
--- CELL the size of one cell (cells overlap on the wall they share).
--- The "swh" console command adjusts them in game, see README.
+-- values: VIEW is the small map viewport at the top right of the screen, PAD
+-- its distance to the screen corner, STEP the distance between two room cells
+-- and CELL the size of one cell (cells overlap on the wall they share).
+-- The "swh" console command adjusts whichever map is on screen.
 local VIEW_SIZE = Vector(47, 47)
-local VIEW_PAD = Vector(6, 6)
+local VIEW_PAD = Vector(8, 3)
 local CELL_STEP = Vector(8, 7)
 local CELL_SIZE = Vector(9, 8)
-local SCROLL_SPEED = 0.3 -- the map slides when moving to another room
-local ROCK_PIVOT = Vector(4, 4) -- rock_icon.anm2
-local ROCK_SIZE = Vector(8, 8)
+-- rock_icon.anm2 is 8x8 with its pivot at the center. A quarter of that
+-- sits on the wall without covering the room icon.
+local ROCK_SCALE = 0.25
+local ROCK_PIVOT = Vector(1, 1)
+local ROCK_SIZE = Vector(2, 2)
+
+-- Expanded map. A short press of the map button leaves it up; holding it
+-- longer and letting go returns to the small one. Cells are a little over
+-- twice as wide, and the rock grows with them.
+-- BIG_PAD is the player's calibration: swh(6, 5) on top of an earlier
+-- (-4, -2) guess, so the rocks sit 2px right and 3px down from the corner.
+-- swh adds bigNudge on top of it.
+local BIG_STEP = Vector(17, 15)
+local BIG_CELL = Vector(18, 16)
+local BIG_PAD = Vector(2, 3)
+local BIG_ROCK_SCALE = 0.5
+local BIG_ROCK = 4
 
 local game = Game()
 local rockSprite = nil
 local snapshots = {} -- [ListIndex] = walkable grid (row -> col -> PATH/BLOCK/EMPTY)
 local cachedHints = {} -- [ListIndex] = { {cellIdx, dir}, ... }
 local rooms = {dim = -1, size = -1, list = {}, occ = {}} -- rooms of the dimension we are in
-local viewCenter = nil -- cell the map is centered on, slides towards the current room
-local nudge = Vector(0, 0) -- console offset on VIEW_PAD
+local viewCenter = nil -- cell the map is centered on, the room the player is in
+local nudge = Vector(0, 0) -- console offset on the small map
+local bigNudge = Vector(0, 0) -- console offset on the expanded map
 local markCenter = false -- console: draw a rock on the middle of the viewport
+-- Expanded-map mode, copied from the game's own machine so a tap keeps it open.
+-- 0 small, 1 button down, 2 latched open. mapFlag is which way the next release goes.
+local mapState = 0
+local mapFlag = false
+local mapFrames = 0
+local hudSuppressed = false -- we hid the HUD so its later pass does not cover the rocks
 
 local SKIP_TYPES = {
 	[RoomType.ROOM_DUNGEON] = true,
@@ -33,6 +54,15 @@ local SKIP_TYPES = {
 	[RoomType.ROOM_SECRET] = true,
 	[RoomType.ROOM_SUPERSECRET] = true,
 	[RoomType.ROOM_ULTRASECRET] = true,
+	[RoomType.ROOM_BOSS] = true,
+}
+
+-- Thin layouts (IH, IV and the long ones). No secret room on those.
+local SMALL_SHAPES = {
+	[RoomShape.ROOMSHAPE_IH] = true,
+	[RoomShape.ROOMSHAPE_IV] = true,
+	[RoomShape.ROOMSHAPE_IIH] = true,
+	[RoomShape.ROOMSHAPE_IIV] = true,
 }
 
 local EXTRA_BLOCK_ENTS = {
@@ -239,11 +269,12 @@ local function floorRock()
 	return chapter[styp + 1] or chapter[1]
 end
 
-local function ensureSprite()
+local function ensureSprite(scale)
 	if not rockSprite then
 		rockSprite = Sprite()
 		rockSprite:Load("gfx/secret_wall_hints/rock_icon.anm2", true)
 	end
+	rockSprite.Scale = Vector(scale, scale)
 	rockSprite:SetFrame("Idle", floorRock())
 	return rockSprite
 end
@@ -411,8 +442,6 @@ local function computeHints(desc, occ)
 		inRoom[desc.GridIndex + off] = true
 	end
 
-	local forceBlock = desc.Data.Type == RoomType.ROOM_BOSS
-
 	for _, off in ipairs(offsets) do
 		local cell = desc.GridIndex + off
 		local lx = (cell % MAP_W) - (desc.GridIndex % MAP_W)
@@ -428,20 +457,18 @@ local function computeHints(desc, occ)
 				if other == nil then
 					local slot = slotForCellDir(lx, ly, dir)
 					local tiles = inwardTiles(shape, slot) or innerLTiles(shape, lx, ly, dir)
-					local blocked = forceBlock
-					if not blocked then
-						if slot == nil and tiles == nil then
-							blocked = true
-						elseif slot ~= nil and not slotAllowed(doors, slot) then
-							blocked = true
-						else
-							-- No snapshot: we have never been in that room, so we
-							-- know where its doors can go but not what stands in
-							-- front of them. The wall stays a maybe until we visit.
-							local grid = snapshots[desc.ListIndex]
-							if grid then
-								blocked = not tilesReachable(grid, tiles)
-							end
+					local blocked = false
+					if slot == nil and tiles == nil then
+						blocked = true
+					elseif slot ~= nil and not slotAllowed(doors, slot) then
+						blocked = true
+					else
+						-- No snapshot: we have never been in that room, so we
+						-- know where its doors can go but not what stands in
+						-- front of them. The wall stays a maybe until we visit.
+						local grid = snapshots[desc.ListIndex]
+						if grid then
+							blocked = not tilesReachable(grid, tiles)
 						end
 					end
 					if blocked then
@@ -463,12 +490,23 @@ local function screenSize()
 	return Vector((pos.X + 60 * 26 / 40) * 2 + 13 * 26, (pos.Y + 140 * 26 / 40) * 2 + 7 * 26)
 end
 
--- Top-left pixel of the map viewport.
-local function viewOrigin()
+-- Top-right corner the maps sit against, after the HUD offset.
+local function mapCorner()
 	local hud = Options.HUDOffset * 10
-	return Vector(
-		screenSize().X - hud * 2.2 - VIEW_PAD.X - VIEW_SIZE.X + nudge.X,
-		hud * 1.2 + VIEW_PAD.Y + nudge.Y)
+	local screen = screenSize()
+	return Vector(screen.X - hud * 2.2 - VIEW_PAD.X, hud * 1.2 + VIEW_PAD.Y)
+end
+
+-- Same corner, shifted by the expanded-map correction and the console nudge.
+local function bigCorner()
+	local corner = mapCorner()
+	return Vector(corner.X + BIG_PAD.X + bigNudge.X, corner.Y + BIG_PAD.Y + bigNudge.Y)
+end
+
+-- Top-left pixel of the small map viewport. nudge is the console offset.
+local function viewOrigin()
+	local corner = mapCorner()
+	return Vector(corner.X - VIEW_SIZE.X + nudge.X, corner.Y + nudge.Y)
 end
 
 local function shapeCells(shape)
@@ -480,41 +518,70 @@ local function shapeCells(shape)
 	return w, h
 end
 
--- The map is centered on the middle of the room the player is in, and slides
--- there instead of jumping when the room changes.
+-- The map is centered on the middle of the room the player is in. The game
+-- does not expose its scroll, so the rocks jump there the same frame.
 local function updateViewCenter()
 	local desc = game:GetLevel():GetCurrentRoomDesc()
 	if desc.GridIndex < 0 or not desc.Data then
 		return nil -- off grid (dungeon, black market): the map is not ours to draw on
 	end
 	local w, h = shapeCells(desc.Data.Shape)
-	local target = Vector(desc.GridIndex % MAP_W + w * 0.5, math.floor(desc.GridIndex / MAP_W) + h * 0.5)
-	if not viewCenter or viewCenter:DistanceSquared(target) < 0.0001 then
-		viewCenter = target
-	else
-		viewCenter = target * SCROLL_SPEED + viewCenter * (1 - SCROLL_SPEED)
-	end
+	viewCenter = Vector(desc.GridIndex % MAP_W + w * 0.5, math.floor(desc.GridIndex / MAP_W) + h * 0.5)
 	return viewCenter
 end
 
--- Rock center, relative to the top-left of the cell. It sits on the wall itself:
--- a hinted wall never has a room behind it, so the outer half covers empty map.
-local function edgeOffset(dir)
+-- Rock center, relative to the top-left of the cell. Half a pixel in from the
+-- wall plus the move onto the room, so the icon sits inside instead of on the
+-- black border. `rock` is the on-screen size.
+local function edgeOffset(dir, cell, rock)
+	local inset = rock * 0.5 + 0.5
 	if dir == DIR_L then
-		return Vector(0.5, CELL_SIZE.Y * 0.5)
+		return Vector(inset, cell.Y * 0.5)
 	elseif dir == DIR_U then
-		return Vector(CELL_SIZE.X * 0.5, 0.5)
+		return Vector(cell.X * 0.5, inset)
 	elseif dir == DIR_R then
-		return Vector(CELL_SIZE.X - 0.5, CELL_SIZE.Y * 0.5)
+		return Vector(cell.X - inset, cell.Y * 0.5)
 	end
-	return Vector(CELL_SIZE.X * 0.5, CELL_SIZE.Y - 0.5)
+	return Vector(cell.X * 0.5, cell.Y - inset)
 end
 
 local function hintPosition(cell, dir, origin, center)
-	local edge = edgeOffset(dir)
+	local edge = edgeOffset(dir, CELL_SIZE, ROCK_SIZE.X)
 	return origin + VIEW_SIZE * 0.5 + Vector(
 		((cell % MAP_W) - center.X) * CELL_STEP.X + edge.X,
 		(math.floor(cell / MAP_W) - center.Y) * CELL_STEP.Y + edge.Y)
+end
+
+-- Cells the map is showing, as a box in grid units. The expanded map packs
+-- that box into the corner instead of scrolling with the player.
+local function shownBounds(floor)
+	local minX, minY, maxX, maxY = MAP_W, MAP_W, 0, 0
+	for _, desc in ipairs(floor.list) do
+		if desc.DisplayFlags & 1 ~= 0 and desc.Data then
+			local gx = desc.GridIndex % MAP_W
+			local gy = math.floor(desc.GridIndex / MAP_W)
+			local w, h = shapeCells(desc.Data.Shape)
+			if gx < minX then minX = gx end
+			if gy < minY then minY = gy end
+			if gx + w > maxX then maxX = gx + w end
+			if gy + h > maxY then maxY = gy + h end
+		end
+	end
+	if maxX <= minX then
+		return nil
+	end
+	return minX, minY, maxX, maxY
+end
+
+-- Rock center on the expanded map. The right of the rightmost room and the
+-- top of the topmost one sit on the same corner as the small map.
+local function bigHintPosition(cell, dir, corner, minY, maxX)
+	local edge = edgeOffset(dir, BIG_CELL, BIG_ROCK)
+	local gx = cell % MAP_W
+	local gy = math.floor(cell / MAP_W)
+	return Vector(
+		corner.X + (gx - maxX) * BIG_STEP.X - (BIG_CELL.X - BIG_STEP.X) + edge.X,
+		corner.Y + (gy - minY) * BIG_STEP.Y + edge.Y)
 end
 
 -- Rooms are cut off at the edge of the viewport, rocks have to be as well.
@@ -527,19 +594,86 @@ local function renderRock(spr, pos, origin)
 	end
 	tlcut:Clamp(0, 0, ROCK_SIZE.X, ROCK_SIZE.Y)
 	brcut:Clamp(0, 0, ROCK_SIZE.X, ROCK_SIZE.Y)
-	spr:Render(pos, tlcut, brcut)
+	-- Clamps are in the 8px frame, the on-screen size is ROCK_SCALE of that.
+	spr:Render(pos, tlcut / ROCK_SCALE, brcut / ROCK_SCALE)
 end
 
-local function mapHeld()
+local function mapButtonDown()
 	for i = 0, game:GetNumPlayers() - 1 do
 		if Input.IsActionPressed(ButtonAction.ACTION_MAP, Isaac.GetPlayer(i).ControllerIndex) then
+			return true
+		end
+	end
+	-- Keyboard and the pads. A player's ControllerIndex is not always the one
+	-- the map button is read from.
+	for c = 0, 3 do
+		if Input.IsActionPressed(ButtonAction.ACTION_MAP, c) then
 			return true
 		end
 	end
 	return false
 end
 
+-- The game keeps the expanded map up after a short press (under 9 frames,
+-- about 150ms) and drops back to the small map when a longer press is
+-- released. While it is up the button is not held, so checking
+-- IsActionPressed draws the small-map rocks on top of the big map.
+-- States match the machine at 0x98dba0: mode in minimap+0, flag in +4,
+-- hold length in +8. State 2 clears the counter, so a press that starts
+-- there is measured from scratch.
+local function updateMapMode()
+	local down = mapButtonDown()
+	if down then
+		mapFrames = mapFrames + 1
+	end
+
+	if mapState == 0 then
+		if down then
+			mapState = 1
+		else
+			mapFrames = 0
+		end
+	elseif mapState == 2 then
+		mapFrames = 0
+		if down then
+			mapState = 1
+		end
+	elseif not down then
+		if mapFrames < 9 then
+			if mapFlag then
+				mapState = 0
+				mapFlag = false
+			else
+				mapState = 2
+				mapFlag = true
+			end
+		elseif mapFlag then
+			mapState = 2
+		else
+			mapState = 0
+		end
+		mapFrames = 0
+	end
+end
+
+local function bigMapOpen()
+	return mapState ~= 0
+end
+
+local function restoreHud()
+	if hudSuppressed then
+		game:GetHUD():SetVisible(true)
+		hudSuppressed = false
+	end
+end
+
+local function onUpdate()
+	restoreHud()
+	updateMapMode()
+end
+
 local function resetFloor()
+	restoreHud()
 	snapshots = {}
 	cachedHints = {}
 	rooms = {dim = -1, size = -1, list = {}, occ = {}}
@@ -548,6 +682,13 @@ end
 
 local function onNewLevel()
 	resetFloor()
+end
+
+local function onExit()
+	resetFloor()
+	mapState = 0
+	mapFlag = false
+	mapFrames = 0
 end
 
 local function onNewRoom()
@@ -565,63 +706,134 @@ local function onNewRoom()
 end
 
 local function onRender()
-	if not game:GetHUD():IsVisible() or game:GetSeeds():HasSeedEffect(SeedEffect.SEED_NO_HUD) then
+	-- Brought back before any early return, including after a pause skipped update.
+	restoreHud()
+	local hud = game:GetHUD()
+	if not hud:IsVisible() or game:GetSeeds():HasSeedEffect(SeedEffect.SEED_NO_HUD) then
 		return
 	end
-	-- Nothing to draw on: the curse replaces the map with a question mark, and
-	-- the expanded map (map button held) is drawn at another scale.
-	if game:GetLevel():GetCurses() & LevelCurse.CURSE_OF_THE_LOST ~= 0 or mapHeld() then
-		return
-	end
-
-	local center = updateViewCenter()
-	if not center then
+	-- The curse replaces the map with a question mark.
+	if game:GetLevel():GetCurses() & LevelCurse.CURSE_OF_THE_LOST ~= 0 then
 		return
 	end
 
-	local spr = ensureSprite()
-	local origin = viewOrigin()
-	local floor = currentRooms()
-
-	-- Every room the map draws a box for, visited or not: a room we only saw
-	-- through a mapping item still tells us where its doors cannot go.
-	for _, desc in ipairs(floor.list) do
-		if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] then
-			local hints = computeHints(desc, floor.occ)
-			for h = 1, #hints do
-				renderRock(spr, hintPosition(hints[h].cell, hints[h].dir, origin, center), origin)
-			end
+	-- The expanded map (short press, or held) is the whole floor at another
+	-- scale. The small one scrolls with the room, and is not drawn off the grid.
+	local big = bigMapOpen()
+	local center = nil
+	if not big then
+		center = updateViewCenter()
+		if not center then
+			return
 		end
 	end
 
-	if markCenter then
-		renderRock(spr, origin + VIEW_SIZE * 0.5, origin)
+	-- MC_POST_RENDER runs before the minimap, so sprites from here end up under
+	-- it. Draw the HUD in this callback, paint the rocks over that, and leave
+	-- the HUD hidden so the game's own pass, just after this callback, draws nothing.
+	hud:Render()
+
+	local floor = currentRooms()
+	if big then
+		local minX, minY, maxX = shownBounds(floor)
+		if minX then
+			local spr = ensureSprite(BIG_ROCK_SCALE)
+			local corner = bigCorner()
+			for _, desc in ipairs(floor.list) do
+				if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] and not SMALL_SHAPES[desc.Data.Shape] then
+					local hints = computeHints(desc, floor.occ)
+					for h = 1, #hints do
+						spr:Render(bigHintPosition(hints[h].cell, hints[h].dir, corner, minY, maxX))
+					end
+				end
+			end
+		end
+	else
+		local spr = ensureSprite(ROCK_SCALE)
+		local origin = viewOrigin()
+
+		-- Every room the map draws a box for, visited or not: a room we only saw
+		-- through a mapping item still tells us where its doors cannot go.
+		for _, desc in ipairs(floor.list) do
+			if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] and not SMALL_SHAPES[desc.Data.Shape] then
+				local hints = computeHints(desc, floor.occ)
+				for h = 1, #hints do
+					renderRock(spr, hintPosition(hints[h].cell, hints[h].dir, origin, center), origin)
+				end
+			end
+		end
+
+		if markCenter then
+			renderRock(spr, origin + VIEW_SIZE * 0.5, origin)
+		end
 	end
+
+	hudSuppressed = true
+	hud:SetVisible(false)
 end
 
 -- Map layout calibration, the game gives us no way to read it back.
--- "swh" prints the offset, "swh <x> <y>" moves the map origin by that many
--- pixels, "swh center" marks the middle of the viewport, "swh reset" clears it.
-local function onCommand(_, cmd, params)
-	if cmd ~= "swh" then
-		return
-	end
+-- Moves the map that is on screen: the expanded one while it is open, the
+-- small one otherwise. "swh" prints that offset, "swh <x> <y>" sets it,
+-- "swh center" marks the middle of the small viewport, "swh reset" clears
+-- the offset of the map that is open.
+local function applyCommand(params)
+	params = params or ""
+	local big = bigMapOpen()
 	if params == "center" then
 		markCenter = not markCenter
 	elseif params == "reset" then
-		nudge = Vector(0, 0)
-		markCenter = false
+		if big then
+			bigNudge = Vector(0, 0)
+		else
+			nudge = Vector(0, 0)
+			markCenter = false
+		end
 	else
 		local x, y = params:match("^%s*(-?%d+%.?%d*)%s+(-?%d+%.?%d*)%s*$")
 		if x then
-			nudge = Vector(tonumber(x), tonumber(y))
+			if big then
+				bigNudge = Vector(tonumber(x), tonumber(y))
+			else
+				nudge = Vector(tonumber(x), tonumber(y))
+			end
 		end
 	end
-	print(string.format("[Secret Wall Hints] nudge %g %g, center mark %s", nudge.X, nudge.Y, tostring(markCenter)))
+	local active = big and bigNudge or nudge
+	local which = big and "big" or "small"
+	local msg = string.format("[Secret Wall Hints] %s map nudge %g %g, center mark %s", which, active.X, active.Y, tostring(markCenter))
+	-- DebugString is log.txt only. ConsoleOutput is the on-screen console.
+	Isaac.DebugString(msg)
+	Isaac.ConsoleOutput(msg .. "\n")
+	return msg
 end
+
+local function onCommand(_, cmd, params)
+	if cmd ~= "swh" then
+		return nil
+	end
+	applyCommand(params)
+	-- A non-nil return from this callback crashes the game.
+	return nil
+end
+
+-- Repentance+ v1.9.7.17 never calls MC_EXECUTE_CMD (unknown commands are
+-- dropped in the console). The built-in `lua` command still runs Lua.
+-- The numbers move the map that is open (expanded map while it is up):
+--   lua swh("center")
+--   lua swh(2, -1)
+--   lua swh("reset")
+rawset(_G, "swh", function(a, b)
+	if type(a) == "number" and type(b) == "number" then
+		return applyCommand(a .. " " .. b)
+	end
+	return applyCommand(a == nil and "" or tostring(a))
+end)
 
 mod:AddCallback(ModCallbacks.MC_POST_NEW_LEVEL, onNewLevel)
 mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, onNewRoom)
-mod:AddCallback(ModCallbacks.MC_POST_RENDER, onRender)
-mod:AddCallback(ModCallbacks.MC_PRE_GAME_EXIT, resetFloor)
+-- After other mods' POST_RENDER, so their sprites stay under the HUD as usual.
+mod:AddPriorityCallback(ModCallbacks.MC_POST_RENDER, CallbackPriority.LATE, onRender)
+mod:AddPriorityCallback(ModCallbacks.MC_POST_UPDATE, CallbackPriority.EARLY, onUpdate)
+mod:AddCallback(ModCallbacks.MC_PRE_GAME_EXIT, onExit)
 mod:AddCallback(ModCallbacks.MC_EXECUTE_CMD, onCommand)
