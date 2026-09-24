@@ -45,6 +45,9 @@ local markCenter = false -- console: draw a rock on the middle of the viewport
 local mapState = 0
 local mapFlag = false
 local mapFrames = 0
+-- Large-map alpha, in tenths. The game adds or subtracts 0.1 a frame (float
+-- 0xbaa120), so the two maps overlap for the whole fade, not one snapped frame.
+local bigAlpha = 0
 local hudSuppressed = false -- we hid the HUD so its later pass does not cover the rocks
 
 local SKIP_TYPES = {
@@ -274,8 +277,10 @@ local function ensureSprite(scale)
 		rockSprite = Sprite()
 		rockSprite:Load("gfx/secret_wall_hints/rock_icon.anm2", true)
 	end
-	rockSprite.Scale = Vector(scale, scale)
+	-- SetFrame applies the anm2 scale and wipes Scale. On the big-to-small
+	-- switch that lands on the first small frame, and the rock is clipped away.
 	rockSprite:SetFrame("Idle", floorRock())
+	rockSprite.Scale = Vector(scale, scale)
 	return rockSprite
 end
 
@@ -455,24 +460,24 @@ local function computeHints(desc, occ)
 			if not inRoom[nidx] then
 				local other = nidx and occ[nidx]
 				if other == nil then
-					local slot = slotForCellDir(lx, ly, dir)
-					local tiles = inwardTiles(shape, slot) or innerLTiles(shape, lx, ly, dir)
-					local blocked = false
-					if slot == nil and tiles == nil then
-						blocked = true
-					elseif slot ~= nil and not slotAllowed(doors, slot) then
-						blocked = true
-					else
-						-- No snapshot: we have never been in that room, so we
-						-- know where its doors can go but not what stands in
-						-- front of them. The wall stays a maybe until we visit.
-						local grid = snapshots[desc.ListIndex]
-						if grid then
+					-- Both checks need the room we walked into. The door mask
+					-- and the grid are on the descriptor before that, and using
+					-- them paints rocks on rooms that are only drawn on the map.
+					local grid = snapshots[desc.ListIndex]
+					if grid then
+						local slot = slotForCellDir(lx, ly, dir)
+						local tiles = inwardTiles(shape, slot) or innerLTiles(shape, lx, ly, dir)
+						local blocked = false
+						if slot == nil and tiles == nil then
+							blocked = true
+						elseif slot ~= nil and not slotAllowed(doors, slot) then
+							blocked = true
+						else
 							blocked = not tilesReachable(grid, tiles)
 						end
-					end
-					if blocked then
-						hints[#hints + 1] = {cell = cell, dir = dir}
+						if blocked then
+							hints[#hints + 1] = {cell = cell, dir = dir}
+						end
 					end
 				end
 			end
@@ -660,6 +665,22 @@ local function bigMapOpen()
 	return mapState ~= 0
 end
 
+-- Same step as the minimap: toward 1 while the expanded map is up, toward 0
+-- once it closes. Held in tenths so 0.1 does not drift.
+local function stepBigAlpha()
+	if mapState ~= 0 then
+		if bigAlpha < 10 then
+			bigAlpha = bigAlpha + 1
+		end
+	elseif bigAlpha > 0 then
+		bigAlpha = bigAlpha - 1
+	end
+end
+
+local function setRockAlpha(spr)
+	spr.Color = Color(1, 1, 1, 1)
+end
+
 local function restoreHud()
 	if hudSuppressed then
 		game:GetHUD():SetVisible(true)
@@ -670,6 +691,7 @@ end
 local function onUpdate()
 	restoreHud()
 	updateMapMode()
+	stepBigAlpha()
 end
 
 local function resetFloor()
@@ -689,6 +711,7 @@ local function onExit()
 	mapState = 0
 	mapFlag = false
 	mapFrames = 0
+	bigAlpha = 0
 end
 
 local function onNewRoom()
@@ -717,13 +740,19 @@ local function onRender()
 		return
 	end
 
-	-- The expanded map (short press, or held) is the whole floor at another
-	-- scale. The small one scrolls with the room, and is not drawn off the grid.
-	local big = bigMapOpen()
+	-- The expanded map fades out over about ten frames. Its rocks do not fade,
+	-- so they were still on screen for the last five of those, after the map
+	-- itself was already gone, and the small rocks only started once that
+	-- leftover ended. Drop the big rocks five frames sooner and start the
+	-- small ones eight frames sooner. Opening holds the small rocks two
+	-- frames longer and waits one frame before the big rocks come in.
+	local closing = mapState == 0
+	local showBig = (closing and bigAlpha > 5) or (not closing and bigAlpha > 1)
+	local showSmall = (closing and bigAlpha <= 7) or (not closing and bigAlpha <= 2)
 	local center = nil
-	if not big then
+	if showSmall then
 		center = updateViewCenter()
-		if not center then
+		if not center and not showBig then
 			return
 		end
 	end
@@ -734,10 +763,11 @@ local function onRender()
 	hud:Render()
 
 	local floor = currentRooms()
-	if big then
+	if showBig then
 		local minX, minY, maxX = shownBounds(floor)
 		if minX then
 			local spr = ensureSprite(BIG_ROCK_SCALE)
+			setRockAlpha(spr)
 			local corner = bigCorner()
 			for _, desc in ipairs(floor.list) do
 				if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] and not SMALL_SHAPES[desc.Data.Shape] then
@@ -748,12 +778,14 @@ local function onRender()
 				end
 			end
 		end
-	else
+	end
+	if showSmall and center then
 		local spr = ensureSprite(ROCK_SCALE)
+		setRockAlpha(spr)
 		local origin = viewOrigin()
 
-		-- Every room the map draws a box for, visited or not: a room we only saw
-		-- through a mapping item still tells us where its doors cannot go.
+		-- Rooms we have walked into. A box the map drew from next door, or from
+		-- a map item, has no snapshot yet and gets no rocks.
 		for _, desc in ipairs(floor.list) do
 			if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] and not SMALL_SHAPES[desc.Data.Shape] then
 				local hints = computeHints(desc, floor.occ)

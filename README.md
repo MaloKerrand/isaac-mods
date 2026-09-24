@@ -1,12 +1,11 @@
 # Secret Wall Hints
 
-Isaac Repentance(+) Lua mod. The minimap gets a small rock on each **outer edge** that cannot hide a secret room:
+Isaac Repentance(+) Lua mod. After you walk into a room, the minimap gets a small rock on each **outer edge** that cannot hide a secret room:
 
-- no door slot (void / disabled wall), as soon as the room is drawn on the map,
-  so a Treasure Map fills in the whole floor at once
-- no walkable path to that wall (rocks, pits, spikes, poop, fires, grimaces, …),
-  this one needs you to have been in the room, so a room can gain rocks when you
-  walk into it
+- no door slot (void / disabled wall)
+- no walkable path to that wall (rocks, pits, spikes, poop, fires, grimaces, …)
+
+A room that is only drawn on the map, from the room next door or from a map item, stays unmarked until you enter it. A room can gain rocks the moment you walk in.
 
 No dependency, the rocks are drawn on the vanilla minimap. The icon is the in
 game rock of the floor you are on, shrunk to map size: 20 of them, one per rock
@@ -41,4 +40,6 @@ the plus, `swh ...` works the same way without the `lua` wrapper.
 
 # TODO
 
-- Fix rocks being shown on non-entered rooms
+- Fix other ui mods breaking, the planetarium icon is flickering
+- Use only one squared rock
+- Add description for steam (thanks AI, minimap api, my first mod)
