@@ -7,10 +7,8 @@ Isaac Repentance(+) Lua mod. After you walk into a room, the minimap gets a smal
 
 A room that is only drawn on the map, from the room next door or from a map item, stays unmarked until you enter it. A room can gain rocks the moment you walk in.
 
-No dependency, the rocks are drawn on the vanilla minimap. The icon is the in
-game rock of the floor you are on, shrunk to map size: 20 of them, one per rock
-art the game has, from the Basement one to the Corpse one. `art/` holds the
-source art, `rock_icon.png` is the 8px sheet the mod loads.
+No dependency, the rocks are drawn on the vanilla minimap. The icon is the
+Basement tinted rock, reskinned in the color of the floor you are on.
 
 ## Install
 
@@ -38,8 +36,29 @@ the plus, `swh ...` works the same way without the `lua` wrapper.
 - `lua swh()` — prints the current offset, to copy into `VIEW_PAD`.
 - `lua swh("reset")` — back to the values in the file.
 
-# TODO
+# Steam
 
-- Fix other ui mods breaking, the planetarium icon is flickering
-- Use only one squared rock
-- Add description for steam (thanks AI, minimap api, my first mod)
+Paste this into the workshop description. Steam uses its own markup, not Markdown.
+
+```
+[h1]Secret Wall Hints[/h1]
+Add a small rock mark in the minimap on wall which cannot lead to a secret room.
+
+[list]
+[*]The wall has no door slot (a void or a disabled wall)
+[*]you cannot walk up to it (rocks, pits, spikes, poop, fires, grimaces, etc.)
+[/list]
+
+TODO: add image
+
+[h1]Notes[/h1]
+[list]
+[*]This is my first mod, so I almost all of the mod was whitten with AI.
+[*]The idea came from roomdle
+[*]A big thanks to MinimapAPI code for helping understand how map works.
+[/list]
+- This is my first mod, so I almost all of the mod was whitten with AI. A big thanks to MinimapAPI code for helping understand how map works.
+
+[h1]Dependances[/h1]
+This mod was made with Repentance+, no other dependancies!
+```

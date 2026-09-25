@@ -13,8 +13,9 @@ local VIEW_SIZE = Vector(47, 47)
 local VIEW_PAD = Vector(8, 3)
 local CELL_STEP = Vector(8, 7)
 local CELL_SIZE = Vector(9, 8)
--- rock_icon.anm2 is 8x8 with its pivot at the center. A quarter of that
--- sits on the wall without covering the room icon.
+-- floor_square.anm2 is the basement rock, 8x8, pivot at the center, one
+-- frame per floor. A quarter of that is 2px on the small map. New filename
+-- so the game does not reuse a cached sheet.
 local ROCK_SCALE = 0.25
 local ROCK_PIVOT = Vector(1, 1)
 local ROCK_SIZE = Vector(2, 2)
@@ -49,6 +50,7 @@ local mapFrames = 0
 -- 0xbaa120), so the two maps overlap for the whole fade, not one snapped frame.
 local bigAlpha = 0
 local hudSuppressed = false -- we hid the HUD so its later pass does not cover the rocks
+local renderPlan = nil -- set once the HUD has been drawn, before other UI mods
 
 local SKIP_TYPES = {
 	[RoomType.ROOM_DUNGEON] = true,
@@ -233,7 +235,7 @@ local function neighborIndex(idx, dir)
 	end
 end
 
--- Frames of rock_icon.png: the in game rock of every floor, shrunk to map size.
+-- Frames of floor_square.png: the basement rock, reskinned to each floor.
 -- Floors that dig up the same rock share a frame (Chest and Home use the
 -- Basement one, Dark Room the Sheol one, Necropolis the Depths one, ...).
 local ROCK = {
@@ -275,7 +277,7 @@ end
 local function ensureSprite(scale)
 	if not rockSprite then
 		rockSprite = Sprite()
-		rockSprite:Load("gfx/secret_wall_hints/rock_icon.anm2", true)
+		rockSprite:Load("gfx/secret_wall_hints/floor_square.anm2", true)
 	end
 	-- SetFrame applies the anm2 scale and wipes Scale. On the big-to-small
 	-- switch that lands on the first small frame, and the rock is clipped away.
@@ -706,12 +708,10 @@ local function onNewLevel()
 	resetFloor()
 end
 
+-- The game's minimap machine lives on the HUD and survives leaving a run.
+-- Clearing ours here left the next run drawing the other map's rocks.
 local function onExit()
 	resetFloor()
-	mapState = 0
-	mapFlag = false
-	mapFrames = 0
-	bigAlpha = 0
 end
 
 local function onNewRoom()
@@ -728,16 +728,15 @@ local function onNewRoom()
 	end
 end
 
-local function onRender()
-	-- Brought back before any early return, including after a pause skipped update.
-	restoreHud()
+-- True when this frame will paint rocks, so the HUD has to be drawn by us.
+local function prepareOverlay()
 	local hud = game:GetHUD()
 	if not hud:IsVisible() or game:GetSeeds():HasSeedEffect(SeedEffect.SEED_NO_HUD) then
-		return
+		return false
 	end
 	-- The curse replaces the map with a question mark.
 	if game:GetLevel():GetCurses() & LevelCurse.CURSE_OF_THE_LOST ~= 0 then
-		return
+		return false
 	end
 
 	-- The expanded map fades out over about ten frames. Its rocks do not fade,
@@ -753,14 +752,38 @@ local function onRender()
 	if showSmall then
 		center = updateViewCenter()
 		if not center and not showBig then
-			return
+			return false
 		end
 	end
+	if not showBig and not showSmall then
+		return false
+	end
+	return true, showBig, showSmall, center
+end
 
-	-- MC_POST_RENDER runs before the minimap, so sprites from here end up under
-	-- it. Draw the HUD in this callback, paint the rocks over that, and leave
-	-- the HUD hidden so the game's own pass, just after this callback, draws nothing.
-	hud:Render()
+-- Before other mods' POST_RENDER. MC_POST_RENDER runs before the minimap, so
+-- the rocks have to be painted over a HUD we drew ourselves. Drawing it here,
+-- and hiding the game's own pass only after every other callback, leaves UI
+-- mods (planetarium chance checks IsVisible and draws in this callback) on
+-- top of that HUD instead of under a second copy of it.
+local function onRenderHud()
+	restoreHud()
+	renderPlan = nil
+	local ok, showBig, showSmall, center = prepareOverlay()
+	if not ok then
+		return
+	end
+	game:GetHUD():Render()
+	renderPlan = {showBig = showBig, showSmall = showSmall, center = center}
+end
+
+local function onRender()
+	local plan = renderPlan
+	renderPlan = nil
+	if not plan then
+		return
+	end
+	local showBig, showSmall, center = plan.showBig, plan.showSmall, plan.center
 
 	local floor = currentRooms()
 	if showBig then
@@ -801,7 +824,7 @@ local function onRender()
 	end
 
 	hudSuppressed = true
-	hud:SetVisible(false)
+	game:GetHUD():SetVisible(false)
 end
 
 -- Map layout calibration, the game gives us no way to read it back.
@@ -864,7 +887,9 @@ end)
 
 mod:AddCallback(ModCallbacks.MC_POST_NEW_LEVEL, onNewLevel)
 mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, onNewRoom)
--- After other mods' POST_RENDER, so their sprites stay under the HUD as usual.
+-- Earlier than default, so UI mods draw after the HUD. Later than EARLY.
+mod:AddPriorityCallback(ModCallbacks.MC_POST_RENDER, -50, onRenderHud)
+-- After other mods' POST_RENDER, so the rocks stay above their icons.
 mod:AddPriorityCallback(ModCallbacks.MC_POST_RENDER, CallbackPriority.LATE, onRender)
 mod:AddPriorityCallback(ModCallbacks.MC_POST_UPDATE, CallbackPriority.EARLY, onUpdate)
 mod:AddCallback(ModCallbacks.MC_PRE_GAME_EXIT, onExit)
