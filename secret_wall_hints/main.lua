@@ -13,7 +13,7 @@ local VIEW_SIZE = Vector(47, 47)
 local VIEW_PAD = Vector(8, 3)
 local CELL_STEP = Vector(8, 7)
 local CELL_SIZE = Vector(9, 8)
--- floor_square.anm2 is the basement rock, 8x8, pivot at the center, one
+-- floor_rock.anm2 is the basement rock, 8x8, pivot at the center, one
 -- frame per floor. A quarter of that is 2px on the small map. New filename
 -- so the game does not reuse a cached sheet.
 local ROCK_SCALE = 0.25
@@ -33,7 +33,10 @@ local BIG_ROCK_SCALE = 0.5
 local BIG_ROCK = 4
 
 local game = Game()
-local rockSprite = nil
+local rockSprites = {} -- "small" / "big". One sprite each; a shared one kept the other map's size.
+local rockFrame = {} -- floor frame last loaded into that sprite
+local spriteEpoch = 0 -- bumped on a new floor so the sprites are built again
+local builtEpoch = -1
 local snapshots = {} -- [ListIndex] = walkable grid (row -> col -> PATH/BLOCK/EMPTY)
 local cachedHints = {} -- [ListIndex] = { {cellIdx, dir}, ... }
 local rooms = {dim = -1, size = -1, list = {}, occ = {}} -- rooms of the dimension we are in
@@ -275,15 +278,30 @@ local function floorRock()
 end
 
 local function ensureSprite(scale)
-	if not rockSprite then
-		rockSprite = Sprite()
-		rockSprite:Load("gfx/secret_wall_hints/floor_square.anm2", true)
+	-- A new floor reloads animations. The sprite loaded on the previous floor
+	-- then draws at the other map's size and stays there, so build a new one.
+	if builtEpoch ~= spriteEpoch then
+		rockSprites = {}
+		rockFrame = {}
+		builtEpoch = spriteEpoch
+	end
+	local key = scale == BIG_ROCK_SCALE and "big" or "small"
+	local frame = floorRock()
+	local spr = rockSprites[key]
+	if not spr or rockFrame[key] ~= frame then
+		spr = Sprite()
+		spr:Load("gfx/secret_wall_hints/floor_rock.anm2", true)
+		-- Idle is one frame per floor. Left running it walks off the frame we
+		-- set and writes the anm2 scale back over Scale.
+		spr.PlaybackSpeed = 0
+		rockSprites[key] = spr
+		rockFrame[key] = frame
 	end
 	-- SetFrame applies the anm2 scale and wipes Scale. On the big-to-small
 	-- switch that lands on the first small frame, and the rock is clipped away.
-	rockSprite:SetFrame("Idle", floorRock())
-	rockSprite.Scale = Vector(scale, scale)
-	return rockSprite
+	spr:SetFrame("Idle", frame)
+	spr.Scale = Vector(scale, scale)
+	return spr
 end
 
 local function isBlockingGrid(gridType)
@@ -706,6 +724,7 @@ end
 
 local function onNewLevel()
 	resetFloor()
+	spriteEpoch = spriteEpoch + 1
 end
 
 -- The game's minimap machine lives on the HUD and survives leaving a run.
@@ -746,7 +765,7 @@ local function prepareOverlay()
 	-- small ones eight frames sooner. Opening holds the small rocks two
 	-- frames longer and waits one frame before the big rocks come in.
 	local closing = mapState == 0
-	local showBig = (closing and bigAlpha > 5) or (not closing and bigAlpha > 1)
+	local showBig = (closing and bigAlpha > 7) or (not closing and bigAlpha > 1)
 	local showSmall = (closing and bigAlpha <= 7) or (not closing and bigAlpha <= 2)
 	local center = nil
 	if showSmall then
