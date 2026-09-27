@@ -410,6 +410,27 @@ local function currentDimension()
 	return 0
 end
 
+-- Downpour and Dross draw the mirror world with a negative X scale. The
+-- mineshaft uses the same dimension and is not flipped.
+local function inMirrorDimension(dim)
+	if dim ~= 1 then
+		return false
+	end
+	local level = game:GetLevel()
+	local stage, styp = level:GetStage(), level:GetStageType()
+	if styp ~= StageType.STAGETYPE_REPENTANCE and styp ~= StageType.STAGETYPE_REPENTANCE_B then
+		return false
+	end
+	if stage == LevelStage.STAGE1_2 then
+		return true
+	end
+	return stage == LevelStage.STAGE1_1 and level:GetCurses() & LevelCurse.CURSE_OF_LABYRINTH ~= 0
+end
+
+local function mirrorX(pos, axis)
+	return Vector(axis * 2 - pos.X, pos.Y)
+end
+
 -- Rooms of the dimension we are in, with the cells they occupy: the mirror
 -- dimension and the mineshaft sit on the same grid indices, and only one of
 -- them is on the map at a time. Rebuilt when a room is added (red rooms).
@@ -805,17 +826,29 @@ local function onRender()
 	local showBig, showSmall, center = plan.showBig, plan.showSmall, plan.center
 
 	local floor = currentRooms()
+	local mirror = inMirrorDimension(floor.dim)
 	if showBig then
 		local minX, minY, maxX = shownBounds(floor)
 		if minX then
 			local spr = ensureSprite(BIG_ROCK_SCALE)
 			setRockAlpha(spr)
 			local corner = bigCorner()
+			-- Flip around the middle of the packed map, so the right edge
+			-- stays on the corner and each rock lands on the mirrored wall.
+			local axis = nil
+			if mirror then
+				local span = (minX - maxX) * BIG_STEP.X - (BIG_CELL.X - BIG_STEP.X)
+				axis = corner.X + span * 0.5
+			end
 			for _, desc in ipairs(floor.list) do
 				if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] and not SMALL_SHAPES[desc.Data.Shape] then
 					local hints = computeHints(desc, floor.occ)
 					for h = 1, #hints do
-						spr:Render(bigHintPosition(hints[h].cell, hints[h].dir, corner, minY, maxX))
+						local pos = bigHintPosition(hints[h].cell, hints[h].dir, corner, minY, maxX)
+						if axis then
+							pos = mirrorX(pos, axis)
+						end
+						spr:Render(pos)
 					end
 				end
 			end
@@ -825,6 +858,7 @@ local function onRender()
 		local spr = ensureSprite(ROCK_SCALE)
 		setRockAlpha(spr)
 		local origin = viewOrigin()
+		local axis = origin.X + VIEW_SIZE.X * 0.5
 
 		-- Rooms we have walked into. A box the map drew from next door, or from
 		-- a map item, has no snapshot yet and gets no rocks.
@@ -832,7 +866,11 @@ local function onRender()
 			if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] and not SMALL_SHAPES[desc.Data.Shape] then
 				local hints = computeHints(desc, floor.occ)
 				for h = 1, #hints do
-					renderRock(spr, hintPosition(hints[h].cell, hints[h].dir, origin, center), origin)
+					local pos = hintPosition(hints[h].cell, hints[h].dir, origin, center)
+					if mirror then
+						pos = mirrorX(pos, axis)
+					end
+					renderRock(spr, pos, origin)
 				end
 			end
 		end
