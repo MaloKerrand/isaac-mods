@@ -51,14 +51,13 @@ Add a small rock mark in the minimap on wall which cannot lead to a secret room.
 
 TODO: add image
 
-[h1]Notes[/h1]
+[h2]Notes[/h2]
 [list]
 [*]This is my first mod, so I almost all of the mod was whitten with AI.
 [*]The idea came from roomdle
 [*]A big thanks to MinimapAPI code for helping understand how map works.
 [/list]
-- This is my first mod, so I almost all of the mod was whitten with AI. A big thanks to MinimapAPI code for helping understand how map works.
 
-[h1]Dependances[/h1]
+[h2]Dependances[/h2]
 This mod was made with Repentance+, no other dependancies!
 ```

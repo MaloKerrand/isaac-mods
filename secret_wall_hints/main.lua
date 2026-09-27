@@ -2,7 +2,7 @@ local mod = RegisterMod("Secret Wall Hints", 1)
 
 local MAP_W = 13
 local PATH, BLOCK, EMPTY, DOOR = 1, 2, 3, 4
-local DIR_L, DIR_U, DIR_R, DIR_D = 0, 1, 2, 3
+local DIR_LEFT, DIR_UP, DIR_RIGHT, DIR_DOWN = 0, 1, 2, 3
 
 -- Vanilla minimap layout. The game exposes none of it, so these are measured
 -- values: VIEW is the small map viewport at the top right of the screen, PAD
@@ -38,8 +38,8 @@ local rockFrame = {} -- floor frame last loaded into that sprite
 local spriteEpoch = 0 -- bumped on a new floor so the sprites are built again
 local builtEpoch = -1
 local snapshots = {} -- [ListIndex] = walkable grid (row -> col -> PATH/BLOCK/EMPTY)
-local cachedHints = {} -- [ListIndex] = { {cellIdx, dir}, ... }
-local rooms = {dim = -1, size = -1, list = {}, occ = {}} -- rooms of the dimension we are in
+local cachedRockPositions = {} -- [ListIndex] = { {cell, direction}, ... }
+local rooms = {dim = -1, size = -1, list = {}, occupiedCells = {}} -- rooms of the dimension we are in
 local viewCenter = nil -- cell the map is centered on, the room the player is in
 local nudge = Vector(0, 0) -- console offset on the small map
 local bigNudge = Vector(0, 0) -- console offset on the expanded map
@@ -86,8 +86,8 @@ local EXTRA_BLOCK_ENTS = {
 	[EntityType.ENTITY_STONE_EYE] = true,
 }
 
--- Occupied 1x1 cells relative to GridIndex (LTL gap is GridIndex itself).
-local SHAPE_OFFSETS = {
+-- Added to GridIndex to reach each 1x1 subroom (LTL's gap is GridIndex itself).
+local SUBROOM_INDEX_OFFSETS = {
 	[RoomShape.ROOMSHAPE_1x1] = {0},
 	[RoomShape.ROOMSHAPE_IH] = {0},
 	[RoomShape.ROOMSHAPE_IV] = {0},
@@ -100,12 +100,12 @@ local SHAPE_OFFSETS = {
 	[RoomShape.ROOMSHAPE_LBR] = {0, 1, 13},
 }
 
-SHAPE_OFFSETS[RoomShape.ROOMSHAPE_IIV or -1] = {0, 13}
-SHAPE_OFFSETS[RoomShape.ROOMSHAPE_IIH or -1] = {0, 1}
+SUBROOM_INDEX_OFFSETS[RoomShape.ROOMSHAPE_IIV or -1] = {0, 13}
+SUBROOM_INDEX_OFFSETS[RoomShape.ROOMSHAPE_IIH or -1] = {0, 1}
 
 -- Inward floor tiles (row, col) that must be walkable for a secret wall.
 -- Coords match game grids: 1x1 is 9x15, 2x1 is 9x28, 1x2 is 16x15, 2x2 is 16x28.
-local function inwardTiles(shape, slot)
+local function inwardTiles(shape, doorSlot)
 	local L0, U0, R0, D0 = DoorSlot.LEFT0, DoorSlot.UP0, DoorSlot.RIGHT0, DoorSlot.DOWN0
 	local L1, U1, R1, D1 = DoorSlot.LEFT1, DoorSlot.UP1, DoorSlot.RIGHT1, DoorSlot.DOWN1
 	local t = {
@@ -167,74 +167,74 @@ local function inwardTiles(shape, slot)
 	t[RoomShape.ROOMSHAPE_IIV or -1] = t[RoomShape.ROOMSHAPE_1x2]
 	local byShape = t[shape]
 	if not byShape then
-		return t[RoomShape.ROOMSHAPE_1x1][slot]
+		return t[RoomShape.ROOMSHAPE_1x1][doorSlot]
 	end
-	return byShape[slot]
+	return byShape[doorSlot]
 end
 
 -- Inner corner of L-rooms (no DoorSlot); a secret can still sit in the missing cell.
-local function innerLTiles(shape, lx, ly, dir)
-	if shape == RoomShape.ROOMSHAPE_LTL and ((lx == 1 and ly == 0 and dir == DIR_L) or (lx == 0 and ly == 1 and dir == DIR_U)) then
+local function innerCornerTiles(shape, shapeX, shapeY, direction)
+	if shape == RoomShape.ROOMSHAPE_LTL and ((shapeX == 1 and shapeY == 0 and direction == DIR_LEFT) or (shapeX == 0 and shapeY == 1 and direction == DIR_UP)) then
 		return {{4, 14}, {8, 7}}
 	end
-	if shape == RoomShape.ROOMSHAPE_LTR and ((lx == 0 and ly == 0 and dir == DIR_R) or (lx == 1 and ly == 1 and dir == DIR_U)) then
+	if shape == RoomShape.ROOMSHAPE_LTR and ((shapeX == 0 and shapeY == 0 and direction == DIR_RIGHT) or (shapeX == 1 and shapeY == 1 and direction == DIR_UP)) then
 		return {{4, 13}, {8, 20}}
 	end
-	if shape == RoomShape.ROOMSHAPE_LBR and ((lx == 1 and ly == 0 and dir == DIR_D) or (lx == 0 and ly == 1 and dir == DIR_R)) then
+	if shape == RoomShape.ROOMSHAPE_LBR and ((shapeX == 1 and shapeY == 0 and direction == DIR_DOWN) or (shapeX == 0 and shapeY == 1 and direction == DIR_RIGHT)) then
 		return {{11, 13}, {7, 20}}
 	end
-	if shape == RoomShape.ROOMSHAPE_LBL and ((lx == 0 and ly == 0 and dir == DIR_D) or (lx == 1 and ly == 1 and dir == DIR_L)) then
+	if shape == RoomShape.ROOMSHAPE_LBL and ((shapeX == 0 and shapeY == 0 and direction == DIR_DOWN) or (shapeX == 1 and shapeY == 1 and direction == DIR_LEFT)) then
 		return {{7, 7}, {11, 14}}
 	end
 	return nil
 end
 
-local function slotForCellDir(lx, ly, dir)
-	if dir == DIR_L then
-		if lx == 0 and ly == 0 then return DoorSlot.LEFT0 end
-		if lx == 0 and ly == 1 then return DoorSlot.LEFT1 end
+local function doorSlotForCell(shapeX, shapeY, direction)
+	if direction == DIR_LEFT then
+		if shapeX == 0 and shapeY == 0 then return DoorSlot.LEFT0 end
+		if shapeX == 0 and shapeY == 1 then return DoorSlot.LEFT1 end
 		return nil
-	elseif dir == DIR_U then
-		if ly == 0 and lx == 0 then return DoorSlot.UP0 end
-		if ly == 0 and lx == 1 then return DoorSlot.UP1 end
+	elseif direction == DIR_UP then
+		if shapeY == 0 and shapeX == 0 then return DoorSlot.UP0 end
+		if shapeY == 0 and shapeX == 1 then return DoorSlot.UP1 end
 		return nil
-	elseif dir == DIR_R then
-		if lx == 0 and ly == 0 then return DoorSlot.RIGHT0 end -- overwritten if 2-wide uses (1,0)
-		if lx == 1 and ly == 0 then return DoorSlot.RIGHT0 end
-		if lx == 1 and ly == 1 then return DoorSlot.RIGHT1 end
-		if lx == 0 and ly == 1 then return DoorSlot.RIGHT1 end
+	elseif direction == DIR_RIGHT then
+		if shapeX == 0 and shapeY == 0 then return DoorSlot.RIGHT0 end -- overwritten if 2-wide uses (1,0)
+		if shapeX == 1 and shapeY == 0 then return DoorSlot.RIGHT0 end
+		if shapeX == 1 and shapeY == 1 then return DoorSlot.RIGHT1 end
+		if shapeX == 0 and shapeY == 1 then return DoorSlot.RIGHT1 end
 		return nil
 	else
-		if ly == 0 and lx == 0 then return DoorSlot.DOWN0 end
-		if ly == 0 and lx == 1 then return DoorSlot.DOWN1 end
-		if ly == 1 and lx == 0 then return DoorSlot.DOWN0 end
-		if ly == 1 and lx == 1 then return DoorSlot.DOWN1 end
+		if shapeY == 0 and shapeX == 0 then return DoorSlot.DOWN0 end
+		if shapeY == 0 and shapeX == 1 then return DoorSlot.DOWN1 end
+		if shapeY == 1 and shapeX == 0 then return DoorSlot.DOWN0 end
+		if shapeY == 1 and shapeX == 1 then return DoorSlot.DOWN1 end
 		return nil
 	end
 end
 
-local function slotAllowed(doors, slot)
-	if slot == nil then
+local function doorSlotEnabled(doorMask, doorSlot)
+	if doorSlot == nil then
 		return false
 	end
-	return doors & (1 << slot) ~= 0
+	return doorMask & (1 << doorSlot) ~= 0
 end
 
-local function neighborIndex(idx, dir)
-	local x = idx % MAP_W
-	local y = math.floor(idx / MAP_W)
-	if dir == DIR_L then
+local function neighborIndex(cell, direction)
+	local x = cell % MAP_W
+	local y = math.floor(cell / MAP_W)
+	if direction == DIR_LEFT then
 		if x == 0 then return nil end
-		return idx - 1
-	elseif dir == DIR_U then
+		return cell - 1
+	elseif direction == DIR_UP then
 		if y == 0 then return nil end
-		return idx - MAP_W
-	elseif dir == DIR_R then
+		return cell - MAP_W
+	elseif direction == DIR_RIGHT then
 		if x == MAP_W - 1 then return nil end
-		return idx + 1
+		return cell + 1
 	else
 		if y == MAP_W - 1 then return nil end
-		return idx + MAP_W
+		return cell + MAP_W
 	end
 end
 
@@ -396,7 +396,7 @@ local function snapshotCurrentRoom()
 	end
 
 	snapshots[desc.ListIndex] = grid
-	cachedHints[desc.ListIndex] = nil
+	cachedRockPositions[desc.ListIndex] = nil
 end
 
 local function currentDimension()
@@ -441,83 +441,83 @@ local function currentRooms()
 	if rooms.dim == dim and rooms.size == list.Size then
 		return rooms
 	end
-	rooms = {dim = dim, size = list.Size, list = {}, occ = {}}
-	cachedHints = {}
+	rooms = {dim = dim, size = list.Size, list = {}, occupiedCells = {}}
+	cachedRockPositions = {}
 	for i = 0, list.Size - 1 do
 		local desc = list:Get(i)
 		if desc and desc.Data and desc.GridIndex >= 0
 			and GetPtrHash(level:GetRoomByIdx(desc.SafeGridIndex, dim)) == GetPtrHash(desc)
 		then
 			rooms.list[#rooms.list + 1] = desc
-			for _, off in ipairs(SHAPE_OFFSETS[desc.Data.Shape] or {0}) do
-				rooms.occ[desc.GridIndex + off] = desc
+			for _, subroomIndexOffset in ipairs(SUBROOM_INDEX_OFFSETS[desc.Data.Shape] or {0}) do
+				rooms.occupiedCells[desc.GridIndex + subroomIndexOffset] = desc
 			end
 		end
 	end
 	return rooms
 end
 
-local function tilesReachable(grid, tiles)
-	if not grid or not tiles then
+local function entranceTilesWalkable(walkGrid, entranceTiles)
+	if not walkGrid or not entranceTiles then
 		return false
 	end
-	for _, tile in ipairs(tiles) do
-		local r, c = tile[1], tile[2]
-		if not grid[r] or grid[r][c] ~= PATH then
+	for _, tile in ipairs(entranceTiles) do
+		local row, col = tile[1], tile[2]
+		if not walkGrid[row] or walkGrid[row][col] ~= PATH then
 			return false
 		end
 	end
 	return true
 end
 
-local function computeHints(desc, occ)
-	local hints = cachedHints[desc.ListIndex]
-	if hints then
-		return hints
+local function computeRockPositions(roomDesc, occupiedCells)
+	local rockPositions = cachedRockPositions[roomDesc.ListIndex]
+	if rockPositions then
+		return rockPositions
 	end
-	hints = {}
-	if desc.GridIndex < 0 or not desc.Data then
-		cachedHints[desc.ListIndex] = hints
-		return hints
+	rockPositions = {}
+	if roomDesc.GridIndex < 0 or not roomDesc.Data then
+		cachedRockPositions[roomDesc.ListIndex] = rockPositions
+		return rockPositions
 	end
-	local shape = desc.Data.Shape
-	local doors = desc.Data.Doors
-	local offsets = SHAPE_OFFSETS[shape] or {0}
-	local inRoom = {}
-	for _, off in ipairs(offsets) do
-		inRoom[desc.GridIndex + off] = true
+	local shape = roomDesc.Data.Shape
+	local doorMask = roomDesc.Data.Doors
+	local subroomIndexOffsets = SUBROOM_INDEX_OFFSETS[shape] or {0}
+	local roomCells = {}
+	for _, subroomIndexOffset in ipairs(subroomIndexOffsets) do
+		roomCells[roomDesc.GridIndex + subroomIndexOffset] = true
 	end
 
-	for _, off in ipairs(offsets) do
-		local cell = desc.GridIndex + off
-		local lx = (cell % MAP_W) - (desc.GridIndex % MAP_W)
-		local ly = math.floor(cell / MAP_W) - math.floor(desc.GridIndex / MAP_W)
+	for _, subroomIndexOffset in ipairs(subroomIndexOffsets) do
+		local cell = roomDesc.GridIndex + subroomIndexOffset
+		local shapeX = (cell % MAP_W) - (roomDesc.GridIndex % MAP_W)
+		local shapeY = math.floor(cell / MAP_W) - math.floor(roomDesc.GridIndex / MAP_W)
 		if shape == RoomShape.ROOMSHAPE_LTL then
-			lx = (cell % MAP_W) - (desc.GridIndex % MAP_W)
-			ly = math.floor(cell / MAP_W) - math.floor(desc.GridIndex / MAP_W)
+			shapeX = (cell % MAP_W) - (roomDesc.GridIndex % MAP_W)
+			shapeY = math.floor(cell / MAP_W) - math.floor(roomDesc.GridIndex / MAP_W)
 		end
-		for dir = 0, 3 do
-			local nidx = neighborIndex(cell, dir)
-			if not inRoom[nidx] then
-				local other = nidx and occ[nidx]
-				if other == nil then
+		for direction = 0, 3 do
+			local neighborCell = neighborIndex(cell, direction)
+			if not roomCells[neighborCell] then
+				local neighborRoom = neighborCell and occupiedCells[neighborCell]
+				if neighborRoom == nil then
 					-- Both checks need the room we walked into. The door mask
 					-- and the grid are on the descriptor before that, and using
 					-- them paints rocks on rooms that are only drawn on the map.
-					local grid = snapshots[desc.ListIndex]
-					if grid then
-						local slot = slotForCellDir(lx, ly, dir)
-						local tiles = inwardTiles(shape, slot) or innerLTiles(shape, lx, ly, dir)
-						local blocked = false
-						if slot == nil and tiles == nil then
-							blocked = true
-						elseif slot ~= nil and not slotAllowed(doors, slot) then
-							blocked = true
+					local walkGrid = snapshots[roomDesc.ListIndex]
+					if walkGrid then
+						local doorSlot = doorSlotForCell(shapeX, shapeY, direction)
+						local entranceTiles = inwardTiles(shape, doorSlot) or innerCornerTiles(shape, shapeX, shapeY, direction)
+						local placeRock = false
+						if doorSlot == nil and entranceTiles == nil then
+							placeRock = true
+						elseif doorSlot ~= nil and not doorSlotEnabled(doorMask, doorSlot) then
+							placeRock = true
 						else
-							blocked = not tilesReachable(grid, tiles)
+							placeRock = not entranceTilesWalkable(walkGrid, entranceTiles)
 						end
-						if blocked then
-							hints[#hints + 1] = {cell = cell, dir = dir}
+						if placeRock then
+							rockPositions[#rockPositions + 1] = {cell = cell, direction = direction}
 						end
 					end
 				end
@@ -525,8 +525,8 @@ local function computeHints(desc, occ)
 		end
 	end
 
-	cachedHints[desc.ListIndex] = hints
-	return hints
+	cachedRockPositions[roomDesc.ListIndex] = rockPositions
+	return rockPositions
 end
 
 -- Screen size in render coordinates; there is no API for it either.
@@ -557,9 +557,9 @@ end
 
 local function shapeCells(shape)
 	local w, h = 1, 1
-	for _, off in ipairs(SHAPE_OFFSETS[shape] or {0}) do
-		w = math.max(w, off % MAP_W + 1)
-		h = math.max(h, math.floor(off / MAP_W) + 1)
+	for _, subroomIndexOffset in ipairs(SUBROOM_INDEX_OFFSETS[shape] or {0}) do
+		w = math.max(w, subroomIndexOffset % MAP_W + 1)
+		h = math.max(h, math.floor(subroomIndexOffset / MAP_W) + 1)
 	end
 	return w, h
 end
@@ -578,21 +578,21 @@ end
 
 -- Rock center, relative to the top-left of the cell. Half a pixel in from the
 -- wall plus the move onto the room, so the icon sits inside instead of on the
--- black border. `rock` is the on-screen size.
-local function edgeOffset(dir, cell, rock)
-	local inset = rock * 0.5 + 0.5
-	if dir == DIR_L then
-		return Vector(inset, cell.Y * 0.5)
-	elseif dir == DIR_U then
-		return Vector(cell.X * 0.5, inset)
-	elseif dir == DIR_R then
-		return Vector(cell.X - inset, cell.Y * 0.5)
+-- black border. `rockSize` is the on-screen size.
+local function edgeOffset(direction, cellSize, rockSize)
+	local inset = rockSize * 0.5 + 0.5
+	if direction == DIR_LEFT then
+		return Vector(inset, cellSize.Y * 0.5)
+	elseif direction == DIR_UP then
+		return Vector(cellSize.X * 0.5, inset)
+	elseif direction == DIR_RIGHT then
+		return Vector(cellSize.X - inset, cellSize.Y * 0.5)
 	end
-	return Vector(cell.X * 0.5, cell.Y - inset)
+	return Vector(cellSize.X * 0.5, cellSize.Y - inset)
 end
 
-local function hintPosition(cell, dir, origin, center)
-	local edge = edgeOffset(dir, CELL_SIZE, ROCK_SIZE.X)
+local function rockScreenPosition(cell, direction, origin, center)
+	local edge = edgeOffset(direction, CELL_SIZE, ROCK_SIZE.X)
 	return origin + VIEW_SIZE * 0.5 + Vector(
 		((cell % MAP_W) - center.X) * CELL_STEP.X + edge.X,
 		(math.floor(cell / MAP_W) - center.Y) * CELL_STEP.Y + edge.Y)
@@ -621,8 +621,8 @@ end
 
 -- Rock center on the expanded map. The right of the rightmost room and the
 -- top of the topmost one sit on the same corner as the small map.
-local function bigHintPosition(cell, dir, corner, minY, maxX)
-	local edge = edgeOffset(dir, BIG_CELL, BIG_ROCK)
+local function bigRockScreenPosition(cell, direction, corner, minY, maxX)
+	local edge = edgeOffset(direction, BIG_CELL, BIG_ROCK)
 	local gx = cell % MAP_W
 	local gy = math.floor(cell / MAP_W)
 	return Vector(
@@ -738,8 +738,8 @@ end
 local function resetFloor()
 	restoreHud()
 	snapshots = {}
-	cachedHints = {}
-	rooms = {dim = -1, size = -1, list = {}, occ = {}}
+	cachedRockPositions = {}
+	rooms = {dim = -1, size = -1, list = {}, occupiedCells = {}}
 	viewCenter = nil
 end
 
@@ -842,9 +842,9 @@ local function onRender()
 			end
 			for _, desc in ipairs(floor.list) do
 				if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] and not SMALL_SHAPES[desc.Data.Shape] then
-					local hints = computeHints(desc, floor.occ)
-					for h = 1, #hints do
-						local pos = bigHintPosition(hints[h].cell, hints[h].dir, corner, minY, maxX)
+					local rockPositions = computeRockPositions(desc, floor.occupiedCells)
+					for _, rockPosition in ipairs(rockPositions) do
+						local pos = bigRockScreenPosition(rockPosition.cell, rockPosition.direction, corner, minY, maxX)
 						if axis then
 							pos = mirrorX(pos, axis)
 						end
@@ -864,9 +864,9 @@ local function onRender()
 		-- a map item, has no snapshot yet and gets no rocks.
 		for _, desc in ipairs(floor.list) do
 			if desc.DisplayFlags & 1 ~= 0 and not SKIP_TYPES[desc.Data.Type] and not SMALL_SHAPES[desc.Data.Shape] then
-				local hints = computeHints(desc, floor.occ)
-				for h = 1, #hints do
-					local pos = hintPosition(hints[h].cell, hints[h].dir, origin, center)
+				local rockPositions = computeRockPositions(desc, floor.occupiedCells)
+				for _, rockPosition in ipairs(rockPositions) do
+					local pos = rockScreenPosition(rockPosition.cell, rockPosition.direction, origin, center)
 					if mirror then
 						pos = mirrorX(pos, axis)
 					end
