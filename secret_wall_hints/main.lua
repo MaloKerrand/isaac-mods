@@ -134,33 +134,32 @@ local function inwardTiles(shape, doorSlot)
 			[R0] = {{4, 26}}, [R1] = {{11, 26}},
 			[D0] = {{14, 7}}, [D1] = {{14, 20}},
 		},
+		-- L-rooms: the two walls of the missing cell keep their slot names
+		-- (LTR's R0 and U1 face the gap). Each wall checks only its own tile,
+		-- so a rock marks the side that is really blocked.
 		[RoomShape.ROOMSHAPE_LTR] = {
 			[L0] = {{4, 1}}, [L1] = {{11, 1}},
-			[U0] = {{1, 7}},
-			[R0] = {{4, 13}, {8, 20}},
-			[R1] = {{11, 26}},
+			[U0] = {{1, 7}}, [U1] = {{8, 20}},
+			[R0] = {{4, 13}}, [R1] = {{11, 26}},
 			[D0] = {{14, 7}}, [D1] = {{14, 20}},
 		},
 		[RoomShape.ROOMSHAPE_LTL] = {
-			[L1] = {{11, 1}},
-			[L0] = {{4, 14}, {8, 7}},
-			[U1] = {{1, 20}},
+			[L0] = {{4, 14}}, [L1] = {{11, 1}},
+			[U0] = {{8, 7}}, [U1] = {{1, 20}},
 			[R0] = {{4, 26}}, [R1] = {{11, 26}},
 			[D0] = {{14, 7}}, [D1] = {{14, 20}},
 		},
 		[RoomShape.ROOMSHAPE_LBR] = {
 			[L0] = {{4, 1}}, [L1] = {{11, 1}},
 			[U0] = {{1, 7}}, [U1] = {{1, 20}},
-			[R0] = {{4, 26}},
-			[R1] = {{11, 13}, {7, 20}},
-			[D0] = {{14, 7}},
+			[R0] = {{4, 26}}, [R1] = {{11, 13}},
+			[D0] = {{14, 7}}, [D1] = {{7, 20}},
 		},
 		[RoomShape.ROOMSHAPE_LBL] = {
-			[L0] = {{4, 1}},
-			[L1] = {{7, 7}, {11, 14}},
+			[L0] = {{4, 1}}, [L1] = {{11, 14}},
 			[U0] = {{1, 7}}, [U1] = {{1, 20}},
 			[R0] = {{4, 26}}, [R1] = {{11, 26}},
-			[D1] = {{14, 20}},
+			[D0] = {{7, 7}}, [D1] = {{14, 20}},
 		},
 	}
 	t[RoomShape.ROOMSHAPE_IIH or -1] = t[RoomShape.ROOMSHAPE_2x1]
@@ -172,45 +171,18 @@ local function inwardTiles(shape, doorSlot)
 	return byShape[doorSlot]
 end
 
--- Inner corner of L-rooms (no DoorSlot); a secret can still sit in the missing cell.
-local function innerCornerTiles(shape, shapeX, shapeY, direction)
-	if shape == RoomShape.ROOMSHAPE_LTL and ((shapeX == 1 and shapeY == 0 and direction == DIR_LEFT) or (shapeX == 0 and shapeY == 1 and direction == DIR_UP)) then
-		return {{4, 14}, {8, 7}}
-	end
-	if shape == RoomShape.ROOMSHAPE_LTR and ((shapeX == 0 and shapeY == 0 and direction == DIR_RIGHT) or (shapeX == 1 and shapeY == 1 and direction == DIR_UP)) then
-		return {{4, 13}, {8, 20}}
-	end
-	if shape == RoomShape.ROOMSHAPE_LBR and ((shapeX == 1 and shapeY == 0 and direction == DIR_DOWN) or (shapeX == 0 and shapeY == 1 and direction == DIR_RIGHT)) then
-		return {{11, 13}, {7, 20}}
-	end
-	if shape == RoomShape.ROOMSHAPE_LBL and ((shapeX == 0 and shapeY == 0 and direction == DIR_DOWN) or (shapeX == 1 and shapeY == 1 and direction == DIR_LEFT)) then
-		return {{7, 7}, {11, 14}}
-	end
-	return nil
-end
-
+-- Slot of an outer wall: left/right walls are numbered by row, top/bottom by
+-- column. Holds for L-rooms too, where the walls of the missing cell can be
+-- in row 1 or column 1 (LTL's LEFT0 is on cell (1, 0)).
 local function doorSlotForCell(shapeX, shapeY, direction)
 	if direction == DIR_LEFT then
-		if shapeX == 0 and shapeY == 0 then return DoorSlot.LEFT0 end
-		if shapeX == 0 and shapeY == 1 then return DoorSlot.LEFT1 end
-		return nil
+		return shapeY == 0 and DoorSlot.LEFT0 or DoorSlot.LEFT1
 	elseif direction == DIR_UP then
-		if shapeY == 0 and shapeX == 0 then return DoorSlot.UP0 end
-		if shapeY == 0 and shapeX == 1 then return DoorSlot.UP1 end
-		return nil
+		return shapeX == 0 and DoorSlot.UP0 or DoorSlot.UP1
 	elseif direction == DIR_RIGHT then
-		if shapeX == 0 and shapeY == 0 then return DoorSlot.RIGHT0 end -- overwritten if 2-wide uses (1,0)
-		if shapeX == 1 and shapeY == 0 then return DoorSlot.RIGHT0 end
-		if shapeX == 1 and shapeY == 1 then return DoorSlot.RIGHT1 end
-		if shapeX == 0 and shapeY == 1 then return DoorSlot.RIGHT1 end
-		return nil
-	else
-		if shapeY == 0 and shapeX == 0 then return DoorSlot.DOWN0 end
-		if shapeY == 0 and shapeX == 1 then return DoorSlot.DOWN1 end
-		if shapeY == 1 and shapeX == 0 then return DoorSlot.DOWN0 end
-		if shapeY == 1 and shapeX == 1 then return DoorSlot.DOWN1 end
-		return nil
+		return shapeY == 0 and DoorSlot.RIGHT0 or DoorSlot.RIGHT1
 	end
+	return shapeX == 0 and DoorSlot.DOWN0 or DoorSlot.DOWN1
 end
 
 local function doorSlotEnabled(doorMask, doorSlot)
@@ -343,7 +315,9 @@ local function snapshotCurrentRoom()
 	end
 
 	for _, ent in ipairs(Isaac.GetRoomEntities()) do
-		if EXTRA_BLOCK_ENTS[ent.Type] or ent:IsActiveEnemy(false) then
+		-- Only fixed obstacles. Enemies move, and one standing in a narrow gap
+		-- cut the flood fill and put rocks on open walls behind it.
+		if EXTRA_BLOCK_ENTS[ent.Type] then
 			local gi = ent.SpawnGridIndex
 			if gi and gi >= 0 then
 				local r = math.floor(gi / width)
@@ -492,10 +466,6 @@ local function computeRockPositions(roomDesc, occupiedCells)
 		local cell = roomDesc.GridIndex + subroomIndexOffset
 		local shapeX = (cell % MAP_W) - (roomDesc.GridIndex % MAP_W)
 		local shapeY = math.floor(cell / MAP_W) - math.floor(roomDesc.GridIndex / MAP_W)
-		if shape == RoomShape.ROOMSHAPE_LTL then
-			shapeX = (cell % MAP_W) - (roomDesc.GridIndex % MAP_W)
-			shapeY = math.floor(cell / MAP_W) - math.floor(roomDesc.GridIndex / MAP_W)
-		end
 		for direction = 0, 3 do
 			local neighborCell = neighborIndex(cell, direction)
 			if not roomCells[neighborCell] then
@@ -507,11 +477,11 @@ local function computeRockPositions(roomDesc, occupiedCells)
 					local walkGrid = snapshots[roomDesc.ListIndex]
 					if walkGrid then
 						local doorSlot = doorSlotForCell(shapeX, shapeY, direction)
-						local entranceTiles = inwardTiles(shape, doorSlot) or innerCornerTiles(shape, shapeX, shapeY, direction)
+						local entranceTiles = inwardTiles(shape, doorSlot)
 						local placeRock = false
-						if doorSlot == nil and entranceTiles == nil then
+						if entranceTiles == nil then
 							placeRock = true
-						elseif doorSlot ~= nil and not doorSlotEnabled(doorMask, doorSlot) then
+						elseif not doorSlotEnabled(doorMask, doorSlot) then
 							placeRock = true
 						else
 							placeRock = not entranceTilesWalkable(walkGrid, entranceTiles)
@@ -660,8 +630,8 @@ local function mapButtonDown()
 	return false
 end
 
--- The game keeps the expanded map up after a short press (under 9 frames,
--- about 150ms) and drops back to the small map when a longer press is
+-- The game keeps the expanded map up after a short press (under 9 updates,
+-- 300ms; it counts in updates, 30/s) and drops back to the small map when a longer press is
 -- released. While it is up the button is not held, so checking
 -- IsActionPressed draws the small-map rocks on top of the big map.
 -- States match the machine at 0x98dba0: mode in minimap+0, flag in +4,
@@ -716,10 +686,6 @@ local function stepBigAlpha()
 	elseif bigAlpha > 0 then
 		bigAlpha = bigAlpha - 1
 	end
-end
-
-local function setRockAlpha(spr)
-	spr.Color = Color(1, 1, 1, 1)
 end
 
 local function restoreHud()
@@ -831,7 +797,6 @@ local function onRender()
 		local minX, minY, maxX = shownBounds(floor)
 		if minX then
 			local spr = ensureSprite(BIG_ROCK_SCALE)
-			setRockAlpha(spr)
 			local corner = bigCorner()
 			-- Flip around the middle of the packed map, so the right edge
 			-- stays on the corner and each rock lands on the mirrored wall.
@@ -856,7 +821,6 @@ local function onRender()
 	end
 	if showSmall and center then
 		local spr = ensureSprite(ROCK_SCALE)
-		setRockAlpha(spr)
 		local origin = viewOrigin()
 		local axis = origin.X + VIEW_SIZE.X * 0.5
 
@@ -949,5 +913,4 @@ mod:AddPriorityCallback(ModCallbacks.MC_POST_RENDER, -50, onRenderHud)
 -- After other mods' POST_RENDER, so the rocks stay above their icons.
 mod:AddPriorityCallback(ModCallbacks.MC_POST_RENDER, CallbackPriority.LATE, onRender)
 mod:AddPriorityCallback(ModCallbacks.MC_POST_UPDATE, CallbackPriority.EARLY, onUpdate)
-mod:AddCallback(ModCallbacks.MC_PRE_GAME_EXIT, onExit)
-mod:AddCallback(ModCallbacks.MC_EXECUTE_CMD, onCommand)
+mod:AddCallback(ModCallbacks.MC_PRE_GAME_EXIT, onExit)mod:AddCallback(ModCallbacks.MC_EXECUTE_CMD, onCommand)

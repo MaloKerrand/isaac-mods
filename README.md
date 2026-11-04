@@ -42,22 +42,22 @@ Paste this into the workshop description. Steam uses its own markup, not Markdow
 
 ```
 [h1]Secret Wall Hints[/h1]
-Add a small rock mark in the minimap on wall which cannot lead to a secret room.
+Adds a small rock mark on the minimap to walls that cannot lead to a secret room.
 
 [list]
 [*]The wall has no door slot (a void or a disabled wall)
-[*]you cannot walk up to it (rocks, pits, spikes, poop, fires, grimaces, etc.)
+[*]You cannot walk up to it (rocks, pits, spikes, poop, fires, grimaces, etc.)
 [/list]
 
 TODO: add image
 
 [h2]Notes[/h2]
 [list]
-[*]This is my first mod, so I almost all of the mod was whitten with AI.
+[*]This is my first mod
 [*]The idea came from roomdle
-[*]A big thanks to MinimapAPI code for helping understand how map works.
+[*]A big thanks to the MinimapAPI code for helping me understand how the map works
 [/list]
 
-[h2]Dependances[/h2]
-This mod was made with Repentance+, no other dependancies!
+[h2]Dependencies[/h2]
+This mod was made with Repentance+, no other dependencies!
 ```

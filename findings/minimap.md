@@ -25,9 +25,9 @@ Working path is a global, run with the built-in `lua` command:
 
 `HUD::Render` bails out when the visibility byte at HUD+`0x54cc` is 0 (`SetVisible` is `0x4aaee0`, `IsVisible` is `0x85e1c0`). `Sprite:Render` is immediate (`0x40a0d0`), not a later queue. `MC_GET_SHADER_PARAMS` runs after the HUD but only when a shader is active, and it binds an offscreen target first, so it is the wrong place to draw.
 
-The mod draws the HUD itself inside `MC_POST_RENDER` (priority `LATE`, so other mods' sprites stay under it), paints the rocks, then `SetVisible(false)`. Visibility comes back at the start of `onRender` and in `MC_POST_UPDATE` (priority `EARLY`). HUD Update (`0x9a2990`) and PostUpdate (`0x9a2b30`) do not look at the flag, so hiding it does not freeze the map.
+The mod draws the HUD itself in a first `MC_POST_RENDER` pass (`onRenderHud`, priority -50, so UI mods at default priority draw on top of it). A second pass (`onRender`, priority `LATE`, after other mods' sprites) paints the rocks, then `SetVisible(false)` so the game's own HUD pass does not cover them. Visibility comes back at the start of `onRenderHud` and in `MC_POST_UPDATE` (priority `EARLY`). HUD Update (`0x9a2990`) and PostUpdate (`0x9a2b30`) do not look at the flag, so hiding it does not freeze the map.
 
-There is a second mod in the log, `planetarium chance`, that draws HUD text from `POST_RENDER`. Late priority keeps our HUD pass after that text.
+There is a second mod in the log, `planetarium chance`, that draws HUD text from `POST_RENDER`. It checks `IsVisible`, so our HUD has to be drawn (and still visible) before it runs: that is why the HUD pass is at -50 and the hide only happens in the `LATE` pass.
 
 ## Small map (player signed off on this)
 
@@ -66,7 +66,7 @@ Large-map alpha is minimap+`0x2d0`. Small-map alpha is +`0x170`. The state machi
 - Mode 1: button is down, big map fades in (alpha +0.1/frame, float `0xbaa120`). Release before the counter reaches 9 latches mode 2 and sets the flag. Release at 9 or later returns to mode 0. The next press (flag already set) is the other way around: a short release returns to the small map, a long one stays latched.
 - Mode 2: big map stays while the button is up. A press goes back to mode 1, and mode 2 zeroes the counter first so the new press is timed from scratch.
 
-Nine frames at 60fps is about 150ms. A tap leaves the full map up. `Input.IsActionPressed(ACTION_MAP)` is already false by then, which is why a single Tab used to draw the small-map rocks on the full map. `updateMapMode` copies this machine. `mapState ~= 0` means draw the big layout. The counter only advances in `MC_POST_UPDATE`. Do not also advance it in `onRender` or a press is counted twice.
+The counter runs at 30/s (game updates), so nine is 300ms. Confirmed with a test command (since removed) that held the map through `MC_INPUT_ACTION` for an exact number of updates: 8 latches the big map, 9 returns to the small one, matching `mapFrames < 9`. The mod's own `Input.IsActionPressed` calls do not go through that hook, so such a tool has to feed `mapButtonDown` directly. A tap leaves the full map up. `Input.IsActionPressed(ACTION_MAP)` is already false by then, which is why a single Tab used to draw the small-map rocks on the full map. `updateMapMode` copies this machine. `mapState ~= 0` means draw the big layout. The counter only advances in `MC_POST_UPDATE`. Do not also advance it in `onRender` or a press is counted twice.
 
 Mode 2's exit back to small, besides the short second press above, was not fully traced. Writes that set the mode to 1 or 2 were not found as plain `mov dword [reg], 1/2` inside `0x98b000-0x98f800`; the transitions are the ones listed above (`0x98e063`, `0x98e083`, `0x98e0be`, `0x98e0fc`, `0x98e15f`).
 
